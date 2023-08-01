@@ -1,0 +1,25 @@
+{
+  "name": "dep-analyzer",
+  "version": "0.1.0",
+  "bin": {
+    "dep-analyzer": "./dist/index.js"
+  },
+  "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wlgf/dep-analyzer.git"
+  },
+  "author": "Team WLGF",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/wlgf/dep-analyzer/issues"
+  },
+  "homepage": "https://github.com/wlgf/dep-analyzer#readme",
+  "devDependencies": {
+    "@types/node": "^20.4.5"
+  },
+  "dependencies": {
+    "typescript": "^5.1.6",
+    "commander": "^11.0.0"
+  }
+}
