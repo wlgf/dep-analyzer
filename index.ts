@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 import { existsSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
-import { Command, InvalidArgumentError } from 'commander'
+import { Command, InvalidArgumentError, Option } from 'commander'
 
 /* Interfaces */
 
-interface AnalyzeOption {
+interface AnalyzeOptions {
   /**
    * 最大递归深度。
    */
@@ -21,43 +21,87 @@ interface AnalyzeOption {
    * 是（`true`）否（`undefined`）输出调试信息。
    */
   debug?: true
-}
 
-interface Dependencies {
-  [name: string]: string
+  /**
+   * 输出 JSON 文件的格式。
+   */
+  format: 'path' | 'name_version' | 'edge'
 }
 
 interface PackageJsonObj {
   name: string
   version: string
-  dependencies?: Dependencies
-  devDependencies?: Dependencies
+  dependencies?: Record<string, string>
+  devDependencies?: Record<string, string>
 }
 
-interface Modules<T> {
-  [path: string]: {
-    name?: string
-    version?: string
-    dev?: boolean
+type Modules<T> = Record<
+  string, // Path
+  {
+    name: string
+    version: string
+    dev: boolean
     requiredBy: T
+    dependencies: string[]
   }
+>
+
+type ResultPath = Modules<string[]>
+
+type ResultNameVersion = Record<
+  string, // Name
+  Record<
+    string, // Version
+    {
+      dev: boolean
+      dependencies: Array<{
+        name: string
+        version: string
+        path: string
+      }>
+      pathes: Record<
+        string, // Path
+        {
+          requiredBy: Array<{
+            name: string
+            version: string
+          }>
+        }
+      >
+    }
+  >
+>
+
+interface ResultEdge {
+  nodes: Array<{
+    node: number
+    name: string
+    version: string
+    dev: boolean
+  }>
+  edges: Array<{
+    source: number
+    target: number
+  }>
 }
+
+type Result = ResultPath | ResultNameVersion | ResultEdge
 
 /* Global Variables */
 
 let global: {
   path: string
-  options: AnalyzeOption
+  options: AnalyzeOptions
   modules: Modules<Set<string>>
 }
 
 /* Functions */
 
-let debug = (...params: any[]): void => {
+const debug = (...params: any[]): void => {
   global.options.debug && console.debug(...params)
 }
 
-let exit = (...params: any[]): void => {
+const exit = (...params: any[]): void => {
   console.error(...params)
   process.exit(1)
 }
@@ -68,8 +112,8 @@ let exit = (...params: any[]): void => {
  * @param {number} [dummyPrev] 该函数上次执行得到的返回值。该参数没有被实际使用，但该参数的存在导致不能直接使用 `parseInt(value, radix)` 作为参数处理函数。
  * @throws 当 `parseInt(value, 10)` 的结果为 `NaN` 时，抛出错误。
  */
-let parseInteger = (value: string, dummyPrev: number): number => {
-  let result = parseInt(value, 10)
+const parseInteger = (value: string, dummyPrev: number): number => {
+  const result = parseInt(value, 10)
   if (isNaN(result)) throw new InvalidArgumentError('not a number.')
   return result
 }
@@ -85,12 +129,12 @@ let parseInteger = (value: string, dummyPrev: number): number => {
  * // 可能返回 './node_modules/B'
  * // 可能抛出错误
  */
-let findDepPath = (name: string, path: string): string => {
-  let current = () => `${path}/node_modules/${name}`
-  let from = path
-  while (1) {
+const findDepPath = (name: string, path: string): string => {
+  const current = (): string => `${path}/node_modules/${name}`
+  const from = path
+  while (true) {
     if (existsSync(current())) break
-    if (path == global.path)
+    if (path === global.path)
       throw new Error(`error: cannot find package '${name}' from ${from}.`)
     path = path.slice(0, path.lastIndexOf('/'))
   }
@@ -104,71 +148,175 @@ let findDepPath = (name: string, path: string): string => {
  * 调用该函数前，须确保 `global.modules[path] !== undefined`。
  * @param {string} [path] `package.json` 所处的路径。
  * @param {number} [depth] 递归深度。
- * @throws 当递归深度大于 `global.options.depth` 时，抛出错误。
+ * @param {boolean} [dev] 该模块是否属于 `devDependencies`。
+ * @param {string} [from] 该模块是哪个模块的依赖。
+ * @returns 当递归深度大于 `global.options.depth` 时，返回 `false`，否则返回 `true`。
  */
-let getDeps = async (path: string, depth: number = 1): Promise<void> => {
-  if (depth > global.options.depth)
-    throw new Error('error: max recursive depth reached.')
+const getDeps = async (
+  path: string,
+  depth: number = 1,
+  dev: boolean = false,
+  from?: string
+): Promise<boolean> => {
+  if (depth > global.options.depth) return false
+
+  if (global.modules[path] !== undefined) {
+    global.modules[path].dev ||= dev
+    if (from !== undefined) global.modules[path].requiredBy.add(from)
+    return true
+  }
 
   const data = await readFile(`${path}/package.json`)
   const packageJsonObj: PackageJsonObj = JSON.parse(data.toString())
+  let result: boolean = true
 
-  global.modules[path].name = packageJsonObj.name
-  global.modules[path].version = packageJsonObj.version
+  const module = (global.modules[path] = {
+    name: packageJsonObj.name,
+    version: packageJsonObj.version,
+    dev,
+    requiredBy: new Set(from === undefined ? [] : [from]),
+    dependencies: new Array<string>(),
+  })
 
   if (packageJsonObj.dependencies !== undefined)
-    for (let depName of Object.keys(packageJsonObj.dependencies)) {
-      let depPath = findDepPath(depName, path)
-      if (global.modules[depPath] !== undefined) {
-        global.modules[depPath].dev = false
-        global.modules[depPath].requiredBy.add(path)
-      } else {
-        global.modules[depPath] = { dev: false, requiredBy: new Set([path]) }
-        await getDeps(depPath, depth + 1)
-      }
+    for (const depName of Object.keys(packageJsonObj.dependencies)) {
+      const depPath = findDepPath(depName, path)
+      module.dependencies.push(depPath)
+      result &&= await getDeps(depPath, depth + 1, false, path)
     }
 
-  if (packageJsonObj.devDependencies !== undefined && path == global.path)
+  if (packageJsonObj.devDependencies !== undefined && path === global.path)
     // 只有宏仓库的 devDependencies 会被安装
-    for (let depName of Object.keys(packageJsonObj.devDependencies)) {
-      let depPath = findDepPath(depName, path)
-      if (global.modules[depPath] !== undefined) {
-        global.modules[depPath].requiredBy.add(path)
-      } else {
-        global.modules[depPath] = { dev: true, requiredBy: new Set([path]) }
-        await getDeps(depPath, depth + 1)
-      }
+    for (const depName of Object.keys(packageJsonObj.devDependencies)) {
+      const depPath = findDepPath(depName, path)
+      module.dependencies.push(depPath)
+      result &&= await getDeps(depPath, depth + 1, true, path)
     }
+
+  return result
 }
 
-let analyze = async (path: string, options: AnalyzeOption) => {
-  try {
-    debug('path:', path)
-    debug('options:', options)
+const getResultNameVersion = (): ResultNameVersion => {
+  const result: ResultNameVersion = {}
+  const pathes = Object.keys(global.modules)
 
+  for (const path of pathes) {
+    const { name, version, dev } = global.modules[path]
+    result[name] ||= {}
+    result[name][version] ||= {
+      dev,
+      dependencies: [],
+      pathes: {},
+    }
+    result[name][version].pathes[path] ||= {
+      requiredBy: [],
+    }
+  }
+
+  for (const tPath of pathes) {
+    const target = global.modules[tPath]
+    const tName = target.name
+    const tVersion = target.version
+
+    for (const sPath of target.requiredBy) {
+      const source = global.modules[sPath]
+      const sName = source.name
+      const sVersion = source.version
+
+      result[sName][sVersion].dependencies.push({
+        name: tName,
+        version: tVersion,
+        path: tPath,
+      })
+
+      result[tName][tVersion].pathes[tPath].requiredBy.push({
+        name: sName,
+        version: sVersion,
+      })
+    }
+  }
+
+  return result
+}
+
+const getResultPath = (): ResultPath => {
+  const result: ResultPath = {}
+
+  for (const path of Object.keys(global.modules))
+    result[path] = {
+      ...global.modules[path],
+      requiredBy: [...global.modules[path].requiredBy],
+    }
+
+  return result
+}
+
+const getResultEdge = (): ResultEdge => {
+  const indeces = new Map<string, number>()
+  const result: ResultEdge = {
+    nodes: [],
+    edges: [],
+  }
+
+  for (const path of Object.keys(global.modules)) {
+    const node = result.nodes.length
+    const { name, version, dev } = global.modules[path]
+    indeces[path] = node
+    result.nodes.push({
+      node,
+      name,
+      version,
+      dev,
+    })
+  }
+
+  for (const sPath of Object.keys(global.modules))
+    for (const tPath of global.modules[sPath].dependencies)
+      result.edges.push({
+        source: indeces[sPath],
+        target: indeces[tPath],
+      })
+
+  return result
+}
+
+const analyze = async (
+  path: string,
+  options: AnalyzeOptions
+): Promise<void> => {
+  try {
     global = {
       path,
       options,
-      modules: { [path]: { dev: false, requiredBy: new Set() } },
+      modules: {},
     }
 
-    await getDeps(path)
+    debug('path:', path)
+    debug('options:', options)
 
-    // 将 Set<string> 转为 Array<string>
-    // 因为 JSON.stringify(new Set([1, 2, 3])) == '{}'
-    let result: Modules<string[]> = {}
-    const pathes = Object.keys(global.modules)
-    for (let path of pathes)
-      result[path] = {
-        ...global.modules[path],
-        requiredBy: [...global.modules[path].requiredBy],
-      }
+    if (!(await getDeps(path))) console.log('max recursive depth reached.')
+
+    let result: Result = {}
+    switch (options.format) {
+      case 'path':
+        result = getResultPath()
+        break
+      case 'name_version':
+        result = getResultNameVersion()
+        break
+      case 'edge':
+        result = getResultEdge()
+        break
+    }
 
     if (options.json !== undefined) {
-      let fileName = `${options.json}/dep-analyze.json`
+      const fileName = `${options.json}/dep-analyze.json`
       await writeFile(fileName, JSON.stringify(result))
       console.log(`saved in ${fileName} successfully.`)
-      console.log(pathes.length - 1, 'dependencies in total.')
+      console.log(
+        Object.keys(global.modules).length - 1,
+        'dependencies in total.'
+      )
     }
   } catch (err) {
     exit(err.message)
@@ -187,8 +335,13 @@ program
 program
   .command('analyze')
   .argument('[path]', 'path of package.json', '.')
-  .option('-d, --depth <n>', 'maximum recursive level', parseInteger)
+  .option('-d, --depth <n>', 'maximum recursive depth', parseInteger)
   .option('-j, --json <path>', 'save result in JSON instead of display')
+  .addOption(
+    new Option('-f, --format <type>', 'JSON format')
+      .choices(['path', 'name_version', 'edge'])
+      .default('name_version')
+  )
   .option('--debug')
   .action(analyze)
 

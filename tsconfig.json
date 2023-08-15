@@ -4,9 +4,7 @@
     "module": "CommonJS",
     "lib": ["ES2016"],
     "outDir": "./dist",
-    "strictNullChecks": true,
+    "strictNullChecks": true
   },
-  "files": [
-    "./index.ts"
-  ]
+  "files": ["./index.ts"]
 }
