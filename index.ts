@@ -9,7 +9,7 @@ interface AnalyzeOptions {
   /**
    * 最大递归深度。
    */
-  depth: number
+  depth?: number
 
   /**
    * 将分析结果保存为 JSON 文件的目标路径。
@@ -18,14 +18,20 @@ interface AnalyzeOptions {
   json?: string
 
   /**
-   * 是（`true`）否（`undefined`）输出调试信息。
-   */
-  debug?: true
-
-  /**
    * 输出 JSON 文件的格式。
    */
   format: 'path' | 'name_version' | 'edge'
+
+  /**
+   * 将结果保存为 Graphviz DOT 文件的目标路径。
+   * - 若为 `undefined`, 则不保存 Graphviz DOT 文件。
+   */
+  dot?: string
+
+  /**
+   * 是（`true`）否（`undefined`）输出调试信息。
+   */
+  debug?: true
 }
 
 interface PackageJsonObj {
@@ -33,6 +39,7 @@ interface PackageJsonObj {
   version: string
   dependencies?: Record<string, string>
   devDependencies?: Record<string, string>
+  optionalDependencies?: Record<string, string>
 }
 
 type Modules<T> = Record<
@@ -158,31 +165,45 @@ const getDeps = async (
   dev: boolean = false,
   from?: string
 ): Promise<boolean> => {
-  if (depth > global.options.depth) return false
-
   if (global.modules[path] !== undefined) {
-    global.modules[path].dev ||= dev
+    global.modules[path].dev &&= dev
     if (from !== undefined) global.modules[path].requiredBy.add(from)
     return true
   }
 
   const data = await readFile(`${path}/package.json`)
   const packageJsonObj: PackageJsonObj = JSON.parse(data.toString())
-  let result: boolean = true
 
   const module = (global.modules[path] = {
     name: packageJsonObj.name,
     version: packageJsonObj.version,
     dev,
     requiredBy: new Set(from === undefined ? [] : [from]),
-    dependencies: new Array<string>(),
+    dependencies: [] as string[],
   })
+
+  if (global.options.depth !== undefined && global.options.depth < depth)
+    return false
+
+  let result = true
+
+  if (packageJsonObj.optionalDependencies !== undefined)
+    for (const depName of Object.keys(packageJsonObj.optionalDependencies)) {
+      try {
+        const depPath = findDepPath(depName, path)
+        module.dependencies.push(depPath)
+        result = (await getDeps(depPath, depth + 1, dev, path)) && result
+      } catch (e) {}
+    }
 
   if (packageJsonObj.dependencies !== undefined)
     for (const depName of Object.keys(packageJsonObj.dependencies)) {
+      if (packageJsonObj.optionalDependencies?.[depName] !== undefined) continue
+      // optionalDependencies 会覆盖 dependencies
+
       const depPath = findDepPath(depName, path)
       module.dependencies.push(depPath)
-      result &&= await getDeps(depPath, depth + 1, false, path)
+      result = (await getDeps(depPath, depth + 1, dev, path)) && result
     }
 
   if (packageJsonObj.devDependencies !== undefined && path === global.path)
@@ -190,7 +211,7 @@ const getDeps = async (
     for (const depName of Object.keys(packageJsonObj.devDependencies)) {
       const depPath = findDepPath(depName, path)
       module.dependencies.push(depPath)
-      result &&= await getDeps(depPath, depth + 1, true, path)
+      result = (await getDeps(depPath, depth + 1, true, path)) && result
     }
 
   return result
@@ -252,7 +273,7 @@ const getResultPath = (): ResultPath => {
 }
 
 const getResultEdge = (): ResultEdge => {
-  const indeces = new Map<string, number>()
+  const indices = new Map<string, number>()
   const result: ResultEdge = {
     nodes: [],
     edges: [],
@@ -261,7 +282,7 @@ const getResultEdge = (): ResultEdge => {
   for (const path of Object.keys(global.modules)) {
     const node = result.nodes.length
     const { name, version, dev } = global.modules[path]
-    indeces[path] = node
+    indices[path] = node
     result.nodes.push({
       node,
       name,
@@ -273,10 +294,25 @@ const getResultEdge = (): ResultEdge => {
   for (const sPath of Object.keys(global.modules))
     for (const tPath of global.modules[sPath].dependencies)
       result.edges.push({
-        source: indeces[sPath],
-        target: indeces[tPath],
+        source: indices[sPath],
+        target: indices[tPath],
       })
 
+  return result
+}
+
+const getGraphvizDOT = (graph: ResultEdge): string => {
+  let result = 'digraph dependencies {\n  node [shape=box]\n'
+
+  for (const node of graph.nodes)
+    result += `  n${node.node} [label="${node.name}\\n${node.version}"${
+      node.dev ? ', style=dashed' : ''
+    }];\n`
+
+  for (const edge of graph.edges)
+    result += `  n${edge.source} -> n${edge.target};\n`
+
+  result += '}\n'
   return result
 }
 
@@ -296,27 +332,31 @@ const analyze = async (
 
     if (!(await getDeps(path))) console.log('max recursive depth reached.')
 
-    let result: Result = {}
-    switch (options.format) {
-      case 'path':
-        result = getResultPath()
-        break
-      case 'name_version':
-        result = getResultNameVersion()
-        break
-      case 'edge':
-        result = getResultEdge()
-        break
-    }
+    const resultEdge = getResultEdge()
 
     if (options.json !== undefined) {
+      let result: Result = {}
+      switch (options.format) {
+        case 'path':
+          result = getResultPath()
+          break
+        case 'name_version':
+          result = getResultNameVersion()
+          break
+        case 'edge':
+          result = resultEdge
+          break
+      }
+
       const fileName = `${options.json}/dep-analyze.json`
       await writeFile(fileName, JSON.stringify(result))
-      console.log(`saved in ${fileName} successfully.`)
-      console.log(
-        Object.keys(global.modules).length - 1,
-        'dependencies in total.'
-      )
+      console.log(fileName, 'saved successfully.')
+    }
+
+    if (options.dot !== undefined) {
+      const fileName = `${options.dot}/dep-analyze.dot`
+      await writeFile(fileName, getGraphvizDOT(resultEdge))
+      console.log(fileName, 'saved successfully.')
     }
   } catch (err) {
     exit(err.message)
@@ -336,12 +376,13 @@ program
   .command('analyze')
   .argument('[path]', 'path of package.json', '.')
   .option('-d, --depth <n>', 'maximum recursive depth', parseInteger)
-  .option('-j, --json <path>', 'save result in JSON instead of display')
+  .option('-j, --json <path>', 'output path of JSON file')
   .addOption(
-    new Option('-f, --format <type>', 'JSON format')
+    new Option('-f, --format <type>', 'format of JSON file')
       .choices(['path', 'name_version', 'edge'])
       .default('name_version')
   )
+  .option('--dot <path>', 'output path of Graphviz DOT file')
   .option('--debug')
   .action(analyze)
 
