@@ -1,6 +1,9 @@
 #!/usr/bin/env node
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
+import { resolve, extname } from 'node:path'
+import { createServer } from 'node:http'
+import { spawn } from 'node:child_process'
 import { Command, InvalidArgumentError, Option } from 'commander'
 
 /* Interfaces */
@@ -28,10 +31,17 @@ interface AnalyzeOptions {
    */
   dot?: string
 
+  port: number
+  host: string
+
   /**
    * 是（`true`）否（`undefined`）输出调试信息。
    */
   debug?: true
+}
+
+interface ServeOptions {
+  host: string
 }
 
 interface PackageJsonObj {
@@ -81,7 +91,7 @@ type ResultNameVersion = Record<
 
 interface ResultEdge {
   nodes: Array<{
-    node: number
+    id: number
     name: string
     version: string
     dev: boolean
@@ -137,13 +147,13 @@ const parseInteger = (value: string, dummyPrev: number): number => {
  * // 可能抛出错误
  */
 const findDepPath = (name: string, path: string): string => {
-  const current = (): string => `${path}/node_modules/${name}`
+  const current = (): string => resolve(path, 'node_modules', name)
   const from = path
   while (true) {
     if (existsSync(current())) break
     if (path === global.path)
       throw new Error(`error: cannot find package '${name}' from ${from}.`)
-    path = path.slice(0, path.lastIndexOf('/'))
+    path = resolve(path, '..')
   }
   debug('found:', current())
   return current()
@@ -171,7 +181,7 @@ const getDeps = async (
     return true
   }
 
-  const data = await readFile(`${path}/package.json`)
+  const data = await readFile(resolve(path, 'package.json'))
   const packageJsonObj: PackageJsonObj = JSON.parse(data.toString())
 
   const module = (global.modules[path] = {
@@ -280,11 +290,11 @@ const getResultEdge = (): ResultEdge => {
   }
 
   for (const path of Object.keys(global.modules)) {
-    const node = result.nodes.length
+    const id = result.nodes.length
     const { name, version, dev } = global.modules[path]
-    indices[path] = node
+    indices[path] = id
     result.nodes.push({
-      node,
+      id,
       name,
       version,
       dev,
@@ -305,7 +315,7 @@ const getGraphvizDOT = (graph: ResultEdge): string => {
   let result = 'digraph dependencies {\n  node [shape=box]\n'
 
   for (const node of graph.nodes)
-    result += `  n${node.node} [label="${node.name}\\n${node.version}"${
+    result += `  n${node.id} [label="${node.name}\\n${node.version}"${
       node.dev ? ', style=dashed' : ''
     }];\n`
 
@@ -348,19 +358,66 @@ const analyze = async (
           break
       }
 
-      const fileName = `${options.json}/dep-analyze.json`
+      const fileName = resolve(options.json, 'dep-analyze.json')
       await writeFile(fileName, JSON.stringify(result))
       console.log(fileName, 'saved successfully.')
     }
 
     if (options.dot !== undefined) {
-      const fileName = `${options.dot}/dep-analyze.dot`
+      const fileName = resolve(options.dot, 'dep-analyze.dot')
       await writeFile(fileName, getGraphvizDOT(resultEdge))
       console.log(fileName, 'saved successfully.')
+    }
+
+    if (options.json === undefined) {
+      const fileName = resolve(__dirname, 'dep-analyze.json')
+      await writeFile(fileName, JSON.stringify(resultEdge))
+      await serve(options.port, { host: options.host })
     }
   } catch (err) {
     exit(err.message)
   }
+}
+
+const serve = async (port: number, options: ServeOptions): Promise<void> => {
+  const server = createServer((req, res) => {
+    let url = req.url ?? '/'
+    if (url === '/') url = '/index.html'
+    debug('request', url)
+
+    const ext = extname(url).toLowerCase()
+    const mime =
+      {
+        '.html': 'text/html',
+        '.js': 'text/javascript',
+        '.css': 'text/css',
+        '.json': 'application/json',
+      }[ext] ?? 'application/octet-stream'
+
+    try {
+      const data = readFileSync(resolve(__dirname, url))
+      res.writeHead(200, {
+        'Cache-Control': 'no-store',
+        'Content-Type': mime,
+      })
+      res.end(data.toString(), 'utf-8')
+    } catch (e) {
+      res.writeHead(e.code === 'ENOENT' ? 404 : 500)
+      res.end()
+    }
+  })
+
+  const url = `http://${options.host}:${port}/`
+  server.listen(port, options.host, () => {
+    const command =
+      {
+        darwin: 'open',
+        win32: 'start',
+      }[process.platform] ?? 'xdg-open'
+
+    spawn(command, [url])
+    console.log(`Server running at ${url}`)
+  })
 }
 
 /* CommandJS */
@@ -383,7 +440,15 @@ program
       .default('name_version')
   )
   .option('--dot <path>', 'output path of Graphviz DOT file')
+  .option('-p, --port <port>', 'port to run the server', parseInteger, 9143)
+  .option('-h, --host <hostname>', 'hostname to run the server', 'localhost')
   .option('--debug')
   .action(analyze)
+
+program
+  .command('serve')
+  .argument('[port]', 'port to run the server', parseInteger, 9143)
+  .option('-h, --host <hostname>', 'hostname to run the server', 'localhost')
+  .action(serve)
 
 program.parse()
