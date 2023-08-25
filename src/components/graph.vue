@@ -212,13 +212,36 @@ export default {
           .attr("offset", function(d) { return d * 100 + "%"; })
           .attr("stop-color", function(d) { return colorScale(d * 100); });
   
-      // 在 SVG 中选择一个矩形元素作为颜色条
-      var colorBar = svg.append("rect")
-          .attr("x", 1100)
-          .attr("y", 200)
-          .attr("width", 20)
-          .attr("height", 200)
-          .style("fill", "url(#color-gradient)");
+      // 绘制刻度条
+      svg
+        .append("rect")
+        .attr("x", 1100)
+        .attr("y", 100)
+        .attr("width", 20)
+        .attr("height", 400)
+        .style("fill", "url(#color-gradient)");
+      
+      // 绘制表头
+      svg.append("text")
+      .attr("x", 1070)
+      .attr("y", 80)
+      .attr("fill", 'black')
+      .attr('font-size', "14px")
+      .attr('font-weight', "bold")
+      .text('连接数颜色值')
+
+      // 绘制刻度文本
+      svg
+        .selectAll(".scale-text")
+        .data(d3.range(Number(this.maxNodeConnect)+1).map(item => `-${item}`).reverse())
+        .enter()
+        .append("text")
+        .style("fill", '#666')
+        .style('font-size', "12px")
+        .attr("x", 1120)
+        .attr("y", (d, i) => 104 + i * (400 / this.maxNodeConnect))
+        .text((d) => d);
+    
 
       function linkArc(d) {
         const r = Math.hypot(d.target.x - d.source.x, d.target.y - d.source.y);
