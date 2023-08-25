@@ -33,14 +33,10 @@ interface AnalyzeOptions {
 
   port: number
   host: string
-
-  /**
-   * 是（`true`）否（`undefined`）输出调试信息。
-   */
-  debug?: true
 }
 
 interface ServeOptions {
+  port: number
   host: string
 }
 
@@ -114,10 +110,6 @@ let global: {
 
 /* Functions */
 
-const debug = (...params: any[]): void => {
-  global.options.debug && console.debug(...params)
-}
-
 const exit = (...params: any[]): void => {
   console.error(...params)
   process.exit(1)
@@ -155,7 +147,6 @@ const findDepPath = (name: string, path: string): string => {
       throw new Error(`error: cannot find package '${name}' from ${from}.`)
     path = resolve(path, '..')
   }
-  debug('found:', current())
   return current()
 }
 
@@ -337,9 +328,6 @@ const analyze = async (
       modules: {},
     }
 
-    debug('path:', path)
-    debug('options:', options)
-
     if (!(await getDeps(path))) console.log('max recursive depth reached.')
 
     const resultEdge = getResultEdge()
@@ -372,19 +360,19 @@ const analyze = async (
     if (options.json === undefined) {
       const fileName = resolve(__dirname, 'dep-analyze.json')
       await writeFile(fileName, JSON.stringify(resultEdge))
-      await serve(options.port, { host: options.host })
+      await serve(undefined, { port: options.port, host: options.host })
     }
   } catch (err) {
     exit(err.message)
   }
 }
 
-const serve = async (port: number, options: ServeOptions): Promise<void> => {
+const serve = async (
+  path: string | undefined,
+  options: ServeOptions
+): Promise<void> => {
   const server = createServer((req, res) => {
-    let url = req.url ?? '/'
-    if (url === '/') url = '/index.html'
-    debug('request', url)
-
+    let url = '.' + (req.url ?? '/')
     const ext = extname(url).toLowerCase()
     const mime =
       {
@@ -394,8 +382,14 @@ const serve = async (port: number, options: ServeOptions): Promise<void> => {
         '.json': 'application/json',
       }[ext] ?? 'application/octet-stream'
 
+    if (url === './') url = './index.html'
+    const fileName =
+      url === './dep-analyze.json'
+        ? resolve(path ?? __dirname, url)
+        : resolve(__dirname, url)
+
     try {
-      const data = readFileSync(resolve(__dirname, url))
+      const data = readFileSync(fileName)
       res.writeHead(200, {
         'Cache-Control': 'no-store',
         'Content-Type': mime,
@@ -407,16 +401,15 @@ const serve = async (port: number, options: ServeOptions): Promise<void> => {
     }
   })
 
-  const url = `http://${options.host}:${port}/`
-  server.listen(port, options.host, () => {
+  const url = `http://${options.host}:${options.port}/`
+  server.listen(options.port, options.host, () => {
     const command =
       {
         darwin: 'open',
         win32: 'start',
       }[process.platform] ?? 'xdg-open'
-
     spawn(command, [url])
-    console.log(`Server running at ${url}`)
+    console.log('server running at', url)
   })
 }
 
@@ -442,12 +435,12 @@ program
   .option('--dot <path>', 'output path of Graphviz DOT file')
   .option('-p, --port <port>', 'port to run the server', parseInteger, 9143)
   .option('-h, --host <hostname>', 'hostname to run the server', 'localhost')
-  .option('--debug')
   .action(analyze)
 
 program
   .command('serve')
-  .argument('[port]', 'port to run the server', parseInteger, 9143)
+  .argument('[path]', 'path of dep_analyze.json')
+  .option('-p, --port <port>', 'port to run the server', parseInteger, 9143)
   .option('-h, --host <hostname>', 'hostname to run the server', 'localhost')
   .action(serve)
 
