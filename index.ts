@@ -358,7 +358,7 @@ const analyze = async (
     }
 
     if (options.json === undefined) {
-      const fileName = resolve(__dirname, 'dep-analyze.json')
+      const fileName = resolve(__dirname, '../dist/dep-analyze.json')
       await writeFile(fileName, JSON.stringify(resultEdge))
       await serve(undefined, { port: options.port, host: options.host })
     }
@@ -372,7 +372,16 @@ const serve = async (
   options: ServeOptions
 ): Promise<void> => {
   const server = createServer((req, res) => {
+    const base = resolve(__dirname, '../dist')
+
     let url = '.' + (req.url ?? '/')
+    if (url === './') url = './index.html'
+
+    const fileName =
+      url === './dep-analyze.json'
+        ? resolve(path ?? base, url)
+        : resolve(base, url)
+
     const ext = extname(url).toLowerCase()
     const mime =
       {
@@ -381,12 +390,6 @@ const serve = async (
         '.css': 'text/css',
         '.json': 'application/json',
       }[ext] ?? 'application/octet-stream'
-
-    if (url === './') url = './index.html'
-    const fileName =
-      url === './dep-analyze.json'
-        ? resolve(path ?? __dirname, url)
-        : resolve(__dirname, url)
 
     try {
       const data = readFileSync(fileName)
