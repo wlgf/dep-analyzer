@@ -433,7 +433,7 @@ program
   .addOption(
     new Option('-f, --format <type>', 'format of JSON file')
       .choices(['path', 'name_version', 'edge'])
-      .default('name_version')
+      .default('edge')
   )
   .option('--dot <path>', 'output path of Graphviz DOT file')
   .option('-p, --port <port>', 'port to run the server', parseInteger, 9143)
